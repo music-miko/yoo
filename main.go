@@ -33,6 +33,7 @@ import (
 	_ "net/http/pprof"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"time"
 
 	"github.com/AshokShau/gotdbot"
@@ -43,7 +44,41 @@ import (
 
 var log = logger.New()
 
+// errorLogPath is where ntgcalls/webrtc logs, Go panics and fatal crashes are saved.
+const errorLogPath = ntgcalls.DefaultErrorLogPath
+
+// setupErrorLog mirrors ntgcalls logs into error_log.txt (terminal output is kept),
+// and makes fatal Go runtime crashes (including cgo SIGSEGV from libntgcalls) land in the same file.
+func setupErrorLog() {
+	if err := ntgcalls.InitErrorLog(errorLogPath); err != nil {
+		fmt.Fprintf(os.Stderr, "cannot open %s: %v\n", errorLogPath, err)
+		return
+	}
+	if f, err := os.OpenFile(errorLogPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644); err == nil {
+		// Go 1.23+: fatal errors / crashes are also written to this file.
+		if err := debug.SetCrashOutput(f, debug.CrashOptions{}); err != nil {
+			fmt.Fprintf(os.Stderr, "SetCrashOutput: %v\n", err)
+		}
+	}
+	fmt.Printf("[debug] ntgcalls logs are saved to %s (NTG_DEBUG=%v)\n", errorLogPath, ntgcalls.DebugEnabled())
+}
+
 func main() {
+	setupErrorLog()
+	defer ntgcalls.CloseErrorLog()
+	// Save Go panics (with stack) to error_log.txt and the terminal, then re-panic.
+	defer func() {
+		if r := recover(); r != nil {
+			msg := fmt.Sprintf("%s [PANIC] %v\n%s\n", time.Now().Format("2006/01/02 15:04:05"), r, debug.Stack())
+			fmt.Fprint(os.Stderr, msg)
+			if f, err := os.OpenFile(errorLogPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644); err == nil {
+				_, _ = f.WriteString(msg)
+				_ = f.Close()
+			}
+			panic(r)
+		}
+	}()
+
 	if err := config.LoadEnv(); err != nil {
 		panic(err)
 	}
