@@ -25,14 +25,17 @@ import (
 	"unsafe"
 )
 
-func init() {
-	C.ntg_set_log_callback((C.ntg_log_cb)(unsafe.Pointer(C.handleLogs)), nil)
-}
-
 var (
 	loggerNTGCalls = NewLogger("ntgcalls", LevelInfo)
 	loggerWebRTC   = NewLogger("webrtc", LevelFatal)
 )
+
+func init() {
+	if DebugEnabled() {
+		SetDebug(true)
+	}
+	C.ntg_set_log_callback((C.ntg_log_cb)(unsafe.Pointer(C.handleLogs)), nil)
+}
 
 func NTgCalls() *Client {
 	instance := &Client{
