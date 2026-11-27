@@ -7,3 +7,6 @@ td_*
 libntgcalls.a
 libtdjson.so.*
 /downloads
+
+error_log.txt
+gdb.txt

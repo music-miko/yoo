@@ -8,17 +8,6 @@
 
 package main
 
-/*
-#cgo linux LDFLAGS: -L . -lntgcalls -lm -lz -lresolv
-#cgo darwin LDFLAGS: -L . -lntgcalls -lc++ -lz -lbz2 -liconv -framework AVFoundation -framework AudioToolbox -framework CoreAudio -framework QuartzCore -framework CoreMedia -framework VideoToolbox -framework AppKit -framework Metal -framework MetalKit -framework OpenGL -framework IOSurface -framework ScreenCaptureKit
-
-// Currently is supported only dynamically linked library on Windows due to
-// https://github.com/golang/go/issues/63903
-#cgo windows LDFLAGS: -L. -lntgcalls
-#include "ntgcalls/ntgcalls.h"
-#include "glibc_compatibility.h"
-*/
-import "C"
 import (
 	"ashokshau/tgmusic/internal/bot"
 	"ashokshau/tgmusic/internal/calls"
@@ -50,6 +39,10 @@ const errorLogPath = ntgcalls.DefaultErrorLogPath
 // setupErrorLog mirrors ntgcalls logs into error_log.txt (terminal output is kept),
 // and makes fatal Go runtime crashes (including cgo SIGSEGV from libntgcalls) land in the same file.
 func setupErrorLog() {
+	// run_debug.sh already tees all output into error_log.txt; avoid writing it twice.
+	if os.Getenv("NTG_NO_FILE_LOG") == "1" {
+		return
+	}
 	if err := ntgcalls.InitErrorLog(errorLogPath); err != nil {
 		fmt.Fprintf(os.Stderr, "cannot open %s: %v\n", errorLogPath, err)
 		return
@@ -71,6 +64,9 @@ func main() {
 		if r := recover(); r != nil {
 			msg := fmt.Sprintf("%s [PANIC] %v\n%s\n", time.Now().Format("2006/01/02 15:04:05"), r, debug.Stack())
 			fmt.Fprint(os.Stderr, msg)
+			if os.Getenv("NTG_NO_FILE_LOG") == "1" {
+				panic(r)
+			}
 			if f, err := os.OpenFile(errorLogPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644); err == nil {
 				_, _ = f.WriteString(msg)
 				_ = f.Close()

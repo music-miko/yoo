@@ -65,21 +65,24 @@ func CloseErrorLog() {
 	}
 }
 
-// teeWriter writes to the terminal and, when configured, to the error log file.
-type teeWriter struct{}
+// fileMinLevel is the lowest level written to error_log.txt.
+// Default: everything that is printed. (Change to LevelWarn to keep only warnings/errors.)
+var fileMinLevel = LevelDebug
 
-func (teeWriter) Write(p []byte) (int, error) {
-	n, err := os.Stdout.Write(p)
+// fileWriter writes to the error log file when it is configured.
+type fileWriter struct{}
+
+func (fileWriter) Write(p []byte) (int, error) {
 	sinkMu.RLock()
 	f := sinkFile
 	sinkMu.RUnlock()
-	if f != nil {
-		_, _ = f.Write(p)
+	if f == nil {
+		return len(p), nil
 	}
-	return n, err
+	return f.Write(p)
 }
 
-var _ io.Writer = teeWriter{}
+var _ io.Writer = fileWriter{}
 
 // DebugEnabled reports whether NTG_DEBUG is set to a truthy value.
 func DebugEnabled() bool {
@@ -96,17 +99,20 @@ func SetDebug(on bool) {
 	if on {
 		loggerNTGCalls.level = LevelDebug
 		loggerWebRTC.level = LevelInfo
+		fileMinLevel = LevelDebug
 		return
 	}
 	loggerNTGCalls.level = LevelInfo
 	loggerWebRTC.level = LevelFatal
+	fileMinLevel = LevelDebug
 }
 
 // Logger provides structured logging for the ntgcalls package.
 type Logger struct {
 	name  string
 	level LogLevel
-	l     *log.Logger
+	l     *log.Logger // terminal
+	fl    *log.Logger // error_log.txt
 }
 
 // NewLogger creates a new Logger instance with the specified name and log level.
@@ -114,13 +120,18 @@ func NewLogger(name string, level LogLevel) *Logger {
 	return &Logger{
 		name:  name,
 		level: level,
-		l:     log.New(teeWriter{}, fmt.Sprintf("[%s] ", name), log.LstdFlags),
+		l:     log.New(os.Stdout, fmt.Sprintf("[%s] ", name), log.LstdFlags),
+		fl:    log.New(fileWriter{}, fmt.Sprintf("[%s] ", name), log.LstdFlags),
 	}
 }
 
 func (lg *Logger) log(level LogLevel, tag string, msg string) {
-	if level >= lg.level {
-		lg.l.Printf("[%s] %s", tag, msg)
+	if level < lg.level {
+		return
+	}
+	lg.l.Printf("[%s] %s", tag, msg)
+	if level >= fileMinLevel {
+		lg.fl.Printf("[%s] %s", tag, msg)
 	}
 }
 

@@ -139,6 +139,7 @@ var (
 	videoIDRe2                     = regexp.MustCompile(`(?:v=|\/)([0-9A-Za-z_-]{11})`)
 	playlistIDRe1                  = regexp.MustCompile(`(?i)(?:youtube\.com|music\.youtube\.com).*(?:\?|&)list=([A-Za-z0-9_-]+)`)
 	playlistIDRe2                  = regexp.MustCompile(`list=([0-9A-Za-z_-]+)`)
+	ytTimestampRe                  = regexp.MustCompile(`^\d{1,2}(?::\d{2}){1,2}$`)
 )
 
 // setYTHeadersWithProfile sets standard headers for YouTube InnerTube API
@@ -203,13 +204,17 @@ func formatYTErr(action string, statusCode int, statusText string, body []byte) 
 	return fmt.Errorf("%s failed: status=%d %s body=%q", action, statusCode, statusText, bodyStr)
 }
 
-func ytRequest(ctx context.Context, path string, extraFields map[string]any, accept func(map[string]any) bool) (map[string]any, error) {
+func ytRequest(ctx context.Context, path string, extraFields map[string]any, accept func(map[string]any) bool, profileOverride ...ytClientProfile) (map[string]any, error) {
 	var lastErr error
+	var searchErr error
 	searchRequest := path == "/youtubei/v1/search"
 	searchQuery, _ := extraFields["query"].(string)
 	profiles := ytProfiles
+	if len(profileOverride) > 0 {
+		profiles = profileOverride
+	}
 	if searchRequest {
-		profiles = slices.DeleteFunc(slices.Clone(ytProfiles), func(prof ytClientProfile) bool { return prof.EmbedURL != "" })
+		profiles = slices.DeleteFunc(slices.Clone(profiles), func(prof ytClientProfile) bool { return prof.EmbedURL != "" })
 	}
 
 	for i, prof := range profiles {
@@ -272,14 +277,17 @@ func ytRequest(ctx context.Context, path string, extraFields map[string]any, acc
 		}
 		if searchRequest {
 			if err := youtubeSearchResponseError(out); err != nil {
-				log.Warnf("YouTube %s response with %s for query %q failed: %v", path, prof.ClientName, searchQuery, err)
-				return nil, err
+				log.Debugf("YouTube %s response with %s for query %q failed: %v", path, prof.ClientName, searchQuery, err)
+				if searchErr == nil || errors.Is(searchErr, errYouTubeSearchNoResults) {
+					searchErr = err
+				}
+				continue
 			}
 		}
 
 		if accept != nil {
 			lastErr = fmt.Errorf("youtube %s (%s): response rejected (empty/invalid)", path, prof.ClientName)
-			log.Warnf("%v", lastErr)
+			log.Debugf("%v", lastErr)
 			continue
 		}
 
@@ -291,6 +299,10 @@ func ytRequest(ctx context.Context, path string, extraFields map[string]any, acc
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
+	}
+	if searchErr != nil {
+		log.Warnf("YouTube %s search for query %q failed across client profiles: %v", path, searchQuery, searchErr)
+		return nil, searchErr
 	}
 	return nil, lastErr
 }
@@ -319,6 +331,13 @@ func searchYouTube(query string, limit int, parentContext ...context.Context) ([
 	})
 
 	if len(tracks) > 0 {
+		if tracks[0].Duration == 0 && len(ytProfiles) > 0 {
+			metadataCtx, metadataCancel := context.WithTimeout(ctx, 3*time.Second)
+			if metadata, metadataErr := getYouTubeVideo(metadataCtx, tracks[0].Id, ytProfiles[0]); metadataErr == nil && len(metadata.Results) > 0 {
+				tracks[0].Duration = metadata.Results[0].Duration
+			}
+			metadataCancel()
+		}
 		return tracks, nil
 	}
 	if errors.Is(err, errYouTubeSearchNoResults) {
@@ -414,12 +433,79 @@ func parseResults(node any, tracks *[]utils.GetUrlTrack, limit int) {
 				})
 				continue
 			}
+			if item, ok := dig(v, "musicResponsiveListItemRenderer").(map[string]any); ok {
+				if track, valid := musicSearchTrack(item); valid {
+					*tracks = append(*tracks, track)
+				}
+				continue
+			}
 
 			for _, child := range v {
 				stack = append(stack, child)
 			}
 		}
 	}
+}
+
+func musicSearchTrack(item map[string]any) (utils.GetUrlTrack, bool) {
+	columns := digArray(item, "flexColumns")
+	if len(columns) < 2 {
+		return utils.GetUrlTrack{}, false
+	}
+	titleRun := dig(columns[0], "musicResponsiveListItemFlexColumnRenderer", "text", "runs", 0)
+	title := digStr(titleRun, "text")
+	id := digStr(titleRun, "navigationEndpoint", "watchEndpoint", "videoId")
+	if id == "" {
+		id = digStr(item, "playlistItemData", "videoId")
+	}
+	itemType := digStr(columns[1], "musicResponsiveListItemFlexColumnRenderer", "text", "runs", 0, "text")
+	if title == "" || id == "" || (itemType != "Song" && itemType != "Video") {
+		return utils.GetUrlTrack{}, false
+	}
+
+	var channel string
+	for _, run := range digArray(columns[1], "musicResponsiveListItemFlexColumnRenderer", "text", "runs") {
+		if digStr(run, "navigationEndpoint", "browseEndpoint", "browseId") != "" {
+			channel = digStr(run, "text")
+			break
+		}
+	}
+	duration := musicSearchDuration(item, columns)
+	return utils.GetUrlTrack{
+		Id:        id,
+		Url:       ytWatchURL + id,
+		Title:     title,
+		Thumbnail: lastThumbURL(digArray(item, "thumbnail", "musicThumbnailRenderer", "thumbnail", "thumbnails")),
+		Channel:   channel,
+		Duration:  duration,
+		Platform:  utils.YouTube,
+	}, true
+}
+
+func musicSearchDuration(item map[string]any, columns []map[string]any) int32 {
+	for _, column := range digArray(item, "fixedColumns") {
+		for _, run := range digArray(column, "musicResponsiveListItemFixedColumnRenderer", "text", "runs") {
+			if duration := ytTimestampDuration(digStr(run, "text")); duration > 0 {
+				return duration
+			}
+		}
+	}
+	for _, column := range columns[1:] {
+		for _, run := range digArray(column, "musicResponsiveListItemFlexColumnRenderer", "text", "runs") {
+			if duration := ytTimestampDuration(digStr(run, "text")); duration > 0 {
+				return duration
+			}
+		}
+	}
+	return 0
+}
+
+func ytTimestampDuration(text string) int32 {
+	text = strings.TrimSpace(text)
+	if ytTimestampRe.MatchString(text) {
+		return parseTimeToSeconds(text)
+	}
+	return 0
 }
 
 // isLiveNow reports whether a videoRenderer map carries the LIVE_NOW badge.
@@ -440,42 +526,47 @@ func isLiveNow(vr map[string]any) bool {
 	return false
 }
 
-// getYouTubeTitleFromOEmbed fetches the video title using YouTube's oEmbed API.
-func getYouTubeTitleFromOEmbed(ctx context.Context, videoID string) (string, error) {
+// getYouTubeTrackFromOEmbed fetches public video metadata without a player request.
+func getYouTubeTrackFromOEmbed(ctx context.Context, videoID string) (utils.GetUrlTrack, error) {
 	apiURL := fmt.Sprintf("https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=%s&format=json", videoID)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
 	if err != nil {
-		return "", fmt.Errorf("build oEmbed request: %w", err)
+		return utils.GetUrlTrack{}, fmt.Errorf("build oEmbed request: %w", err)
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("oEmbed request failed: %w", err)
+		return utils.GetUrlTrack{}, fmt.Errorf("oEmbed request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("oEmbed returned status code: %d", resp.StatusCode)
+		return utils.GetUrlTrack{}, fmt.Errorf("oEmbed returned status code: %d", resp.StatusCode)
 	}
 
 	var data struct {
-		Title string `json:"title"`
+		Title        string `json:"title"`
+		AuthorName   string `json:"author_name"`
+		ThumbnailURL string `json:"thumbnail_url"`
 	}
 	if err = json.NewDecoder(io.LimitReader(resp.Body, 1*1024*1024)).Decode(&data); err != nil {
-		return "", fmt.Errorf("failed to decode oEmbed response: %w", err)
+		return utils.GetUrlTrack{}, fmt.Errorf("failed to decode oEmbed response: %w", err)
 	}
 
 	if data.Title == "" {
-		return "", errors.New("oEmbed response contained empty title")
+		return utils.GetUrlTrack{}, errors.New("oEmbed response contained empty title")
 	}
 
-	return data.Title, nil
+	return utils.GetUrlTrack{
+		Id: videoID, Url: ytWatchURL + videoID, Title: data.Title,
+		Channel: data.AuthorName, Thumbnail: data.ThumbnailURL, Platform: utils.YouTube,
+	}, nil
 }
 
-func getYouTubeVideo(ctx context.Context, videoID string) (*utils.PlatformTracks, error) {
+func getYouTubeVideo(ctx context.Context, videoID string, profiles ...ytClientProfile) (*utils.PlatformTracks, error) {
 	resp, err := ytRequest(ctx, "/youtubei/v1/player", map[string]any{"videoId": videoID}, func(data map[string]any) bool {
 		return digStr(data, "videoDetails", "videoId") != ""
-	})
+	}, profiles...)
 	if err != nil {
 		return nil, err
 	}

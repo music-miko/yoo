@@ -19,7 +19,8 @@ fi
 [ -f .env ] && { set -a; . ./.env; set +a; }
 
 export NTG_DEBUG="${NTG_DEBUG:-true}"   # verbose ntgcalls logs
-export GOTRACEBACK=crash                # full Go stacks on fatal errors
+export GOTRACEBACK=all                  # full Go stacks on fatal errors
+export NTG_NO_FILE_LOG=1                # this script tees into error_log.txt itself (no duplicates)
 ulimit -c unlimited 2>/dev/null || true
 
 echo "===== run started $(date -Is) (NTg debug=$NTG_DEBUG) =====" | tee -a "$LOG"
@@ -30,6 +31,8 @@ gdb -q -batch \
   -iex "handle SIGPIPE pass nostop noprint" \
   -iex "handle SIGINT pass nostop noprint" \
   -iex "handle SIGURG pass nostop noprint" \
+  -iex "handle SIGHUP pass nostop print" \
+  -iex "handle SIGTERM pass nostop print" \
   -iex "set logging enabled on" \
   -iex "set debuginfod enabled on" \
   -ex run -ex "thread apply all bt" -ex "info sharedlibrary" \
