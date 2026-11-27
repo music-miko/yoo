@@ -18,7 +18,7 @@ fi
 
 [ -f .env ] && { set -a; . ./.env; set +a; }
 
-export NTG_DEBUG="${NTG_DEBUG:-true}"   # verbose ntgcalls logs
+export NTG_DEBUG="${NTG_DEBUG:-false}"   # verbose ntgcalls logs
 export GOTRACEBACK=all                  # full Go stacks on fatal errors
 export NTG_NO_FILE_LOG=1                # this script tees into error_log.txt itself (no duplicates)
 ulimit -c unlimited 2>/dev/null || true
